@@ -16,12 +16,13 @@
 
 typedef struct _CRYPTBLOCK
 {
-  Pager    *pPager;       /* Pager this cryptblock belongs to */
-  HCRYPTKEY hReadKey;     /* Key used to read from the database and write to the journal */
-  HCRYPTKEY hWriteKey;    /* Key used to write to the database */
-  DWORD     dwPageSize;   /* Size of pages */
-  LPVOID    pvCrypt;      /* A buffer for encrypting/decrypting (if necessary) */
-  DWORD     dwCryptSize;  /* Equal to or greater than dwPageSize.  If larger, pvCrypt is valid and this is its size */
+  Pager    *    pPager;       /* Pager this cryptblock belongs to */
+  HCRYPTKEY     hReadKey;     /* Key used to read from the database and write to the journal */
+  HCRYPTKEY     hWriteKey;    /* Key used to write to the database */
+  DWORD         dwPageSize;   /* Size of pages */
+  LPVOID        pvCrypt;      /* A buffer for encrypting/decrypting */
+  DWORD         dwBlockSize;  /* Block size of the encryption algorithm (in bytes) */
+  LPVOID        pvIV;         /* A buffer for storing the IV of the encryption algorithm mode */
 } CRYPTBLOCK, *LPCRYPTBLOCK;
 
 HCRYPTPROV g_hProvider = 0; /* Global instance of the cryptographic provider */
@@ -43,23 +44,23 @@ void sqlite3_activate_see(const char *info)
 */
 static BOOL InitializeProvider()
 {
-  MUTEX_LOGIC( sqlite3_mutex *pMaster = sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_MASTER); )
-  sqlite3_mutex_enter(pMaster);
+    BOOL result = FALSE;
+    MUTEX_LOGIC( sqlite3_mutex *pMaster = sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_MASTER); )
+    __try
+    {
+        sqlite3_mutex_enter(pMaster);
 
-  if (g_hProvider)
-  {
-    sqlite3_mutex_leave(pMaster);
-    return TRUE;
-  }
-
-  if (!CryptAcquireContext(&g_hProvider, NULL, MS_ENHANCED_PROV, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
-  {
-    sqlite3_mutex_leave(pMaster);
-    return FALSE;
-  }
-
-  sqlite3_mutex_leave(pMaster);
-  return TRUE;
+        if (g_hProvider)
+        {
+            return TRUE;
+        }
+        result = CryptAcquireContext(&g_hProvider, NULL, MS_ENH_RSA_AES_PROV, PROV_RSA_AES, CRYPT_VERIFYCONTEXT);
+    }
+    __finally
+    {
+        sqlite3_mutex_leave(pMaster);
+    }
+    return result;
 }
 
 /* Create or update a cryptographic context for a pager.
@@ -73,7 +74,7 @@ static LPCRYPTBLOCK CreateCryptBlock(HCRYPTKEY hKey, Pager *pager, int pageSize,
 
   if (!pExisting) /* Creating a new cryptblock */
   {
-    pBlock = sqlite3_malloc(sizeof(CRYPTBLOCK));
+    pBlock = (LPCRYPTBLOCK)sqlite3_malloc(sizeof(CRYPTBLOCK));
     if (!pBlock) return NULL;
 
     ZeroMemory(pBlock, sizeof(CRYPTBLOCK));
@@ -90,7 +91,6 @@ static LPCRYPTBLOCK CreateCryptBlock(HCRYPTKEY hKey, Pager *pager, int pageSize,
 
   pBlock->pPager = pager;
   pBlock->dwPageSize = (DWORD)pageSize;
-  pBlock->dwCryptSize = pBlock->dwPageSize;
 
   /* Existing cryptblocks may have a buffer, if so, delete it */
   if (pBlock->pvCrypt)
@@ -99,9 +99,7 @@ static LPCRYPTBLOCK CreateCryptBlock(HCRYPTKEY hKey, Pager *pager, int pageSize,
     pBlock->pvCrypt = NULL;
   }
 
-  /* Figure out how big to make our spare crypt block */
-  CryptEncrypt(hKey, 0, TRUE, 0, NULL, &pBlock->dwCryptSize, pBlock->dwCryptSize * 2);
-  pBlock->pvCrypt = sqlite3_malloc(pBlock->dwCryptSize + (CRYPT_OFFSET * 2));
+  pBlock->pvCrypt = sqlite3_malloc(pBlock->dwPageSize);
   if (!pBlock->pvCrypt)
   {
     /* We created a new block in here, so free it.  Otherwise leave the original intact */
@@ -111,6 +109,32 @@ static LPCRYPTBLOCK CreateCryptBlock(HCRYPTKEY hKey, Pager *pager, int pageSize,
     return NULL;
   }
 
+  {
+      DWORD dwGutter;
+      DWORD dwBlockSize;
+      CryptGetKeyParam(hKey, KP_BLOCKLEN, (BYTE*)&dwBlockSize, &dwGutter, 0);
+      dwBlockSize /= 8;
+      if (dwBlockSize != pBlock->dwBlockSize)
+      {
+          pBlock->dwBlockSize = dwBlockSize;
+          if (pBlock->pvIV)
+          {
+              sqlite3_free(pBlock->pvIV);
+              pBlock->pvIV = 0;
+          }
+          pBlock->pvIV = sqlite3_malloc(pBlock->dwBlockSize);
+          if (!pBlock->pvIV)
+          {
+              if (pBlock != pExisting)
+              {
+                  sqlite3_free(pBlock->pvCrypt);
+                  sqlite3_free(pBlock);
+              }
+              return NULL;
+          }
+      }
+  }
+  
   return pBlock;
 }
 
@@ -129,11 +153,19 @@ static void sqlite3CodecFree(LPVOID pv)
   {
     CryptDestroyKey(pBlock->hWriteKey);
   }
+  pBlock->hReadKey = 0;
+  pBlock->hWriteKey = 0;
 
   /* If there's extra buffer space allocated, free it as well */
   if (pBlock->pvCrypt)
   {
     sqlite3_free(pBlock->pvCrypt);
+    pBlock->pvCrypt = 0;
+  }
+  if (pBlock->pvIV)
+  {
+      sqlite3_free(pBlock->pvIV);
+      pBlock->pvIV = 0;
   }
 
   /* All done with this cryptblock */
@@ -155,11 +187,15 @@ void sqlite3CodecSizeChange(void *pArg, int pageSize, int reservedSize)
 void * sqlite3Codec(void *pArg, void *data, Pgno nPageNum, int nMode)
 {
   LPCRYPTBLOCK pBlock = (LPCRYPTBLOCK)pArg;
-  DWORD dwPageSize;
-  LPVOID pvTemp = NULL;
+  DWORD dwEffectivePageSize;
+  DWORD dwBlockSize;
+  HCRYPTKEY hCurrentKey;
 
   if (!pBlock) return data;
   if (pBlock->pvCrypt == NULL) return NULL; /* This only happens if CreateCryptBlock() failed to make scratch space */
+
+  dwBlockSize = pBlock->dwBlockSize;
+  dwEffectivePageSize = pBlock->dwPageSize - dwBlockSize;
 
   switch(nMode)
   {
@@ -168,40 +204,63 @@ void * sqlite3Codec(void *pArg, void *data, Pgno nPageNum, int nMode)
   case 3: /* Load a page */
     if (!pBlock->hReadKey) break;
 
-    /* Block ciphers often need to write extra padding beyond the
-    data block.  We don't have that luxury for a given page of data so
-    we must copy the page data to a buffer that IS large enough to hold
-    the padding.  We then encrypt the block and write the buffer back to
-    the page without the unnecessary padding.
-    We only use the special block of memory if its absolutely necessary. */
-    if (pBlock->dwCryptSize != pBlock->dwPageSize)
+    // Obtain a local key for actual decryption
+    if (!CryptDuplicateKey(pBlock->hReadKey, NULL, 0, &hCurrentKey))
+        break;
+
+    __try
     {
-      CopyMemory(((LPBYTE)pBlock->pvCrypt) + CRYPT_OFFSET, data, pBlock->dwPageSize);
-      pvTemp = data;
-      data = ((LPBYTE)pBlock->pvCrypt) + CRYPT_OFFSET;
+        // Read IV from the reserved space at the end of the page
+        CopyMemory(pBlock->pvIV, ((LPBYTE)data) + dwEffectivePageSize, dwBlockSize);
+        if (!CryptSetKeyParam(hCurrentKey, KP_IV, (BYTE*)pBlock->pvIV, 0))
+            break;
+
+        // Decrypt!
+        {
+            DWORD dwBufferSize = dwEffectivePageSize;
+            CryptDecrypt(hCurrentKey, 0, FALSE, 0, (LPBYTE)data, &dwBufferSize);
+        }
+    }
+    __finally
+    {
+        // Destroy the local decryption key
+        CryptDestroyKey(hCurrentKey);
     }
 
-    dwPageSize = pBlock->dwCryptSize;
-    CryptDecrypt(pBlock->hReadKey, 0, TRUE, 0, (LPBYTE)data, &dwPageSize);
-
-    /* If the encryption algorithm required extra padding and we were forced to encrypt or
-    ** decrypt a copy of the page data to a temp buffer, then write the contents of the temp
-    ** buffer back to the page data minus any padding applied.
-    */
-    if (pBlock->dwCryptSize != pBlock->dwPageSize)
-    {
-      CopyMemory(pvTemp, data, pBlock->dwPageSize);
-      data = pvTemp;
-    }
     break;
   case 6: /* Encrypt a page for the main database file */
     if (!pBlock->hWriteKey) break;
+  
+    // Obtain a local key for actual encryption
+    if (!CryptDuplicateKey(pBlock->hWriteKey, NULL, 0, &hCurrentKey))
+        break;
 
-    CopyMemory(((LPBYTE)pBlock->pvCrypt) + CRYPT_OFFSET, data, pBlock->dwPageSize);
-    data = ((LPBYTE)pBlock->pvCrypt) + CRYPT_OFFSET;
+    __try
+    {
+        if (!CryptGenRandom(g_hProvider, dwBlockSize, (LPBYTE)pBlock->pvIV))
+            break;
+        if (!CryptSetKeyParam(hCurrentKey, KP_IV, (LPBYTE)pBlock->pvIV, 0))
+            break;
 
-    dwPageSize = pBlock->dwPageSize;
-    CryptEncrypt(pBlock->hWriteKey, 0, TRUE, 0, ((LPBYTE)pBlock->pvCrypt) + CRYPT_OFFSET, &dwPageSize, pBlock->dwCryptSize);
+        // Copy page data into buffer
+        CopyMemory((LPBYTE)pBlock->pvCrypt, data, pBlock->dwPageSize);
+        data = (LPBYTE)pBlock->pvCrypt;
+
+        // Copy IV to reserved space at the end of the page
+        CopyMemory(((LPBYTE)data) + dwEffectivePageSize, pBlock->pvIV, dwBlockSize);
+
+        // Encrypt effective page data (except IV)
+        {
+            DWORD dwBufferSize = dwEffectivePageSize;
+            CryptEncrypt(hCurrentKey, 0, FALSE, 0, ((LPBYTE)data), &dwBufferSize, dwBufferSize);
+        }
+    }
+    __finally
+    {
+        // Destroy local encryption key
+        CryptDestroyKey(hCurrentKey);
+    }
+
     break;
   case 7: /* Encrypt a page for the journal file */
     /* Under normal circumstances, the readkey is the same as the writekey.  However,
@@ -214,11 +273,37 @@ void * sqlite3Codec(void *pArg, void *data, Pgno nPageNum, int nMode)
     */
     if (!pBlock->hReadKey) break;
 
-    CopyMemory(((LPBYTE)pBlock->pvCrypt) + CRYPT_OFFSET, data, pBlock->dwPageSize);
-    data = ((LPBYTE)pBlock->pvCrypt) + CRYPT_OFFSET;
+    // Obtain a local key for actual encryption
+    if (!CryptDuplicateKey(pBlock->hReadKey, NULL, 0, &hCurrentKey))
+        break;
 
-    dwPageSize = pBlock->dwPageSize;
-    CryptEncrypt(pBlock->hReadKey, 0, TRUE, 0, ((LPBYTE)pBlock->pvCrypt) + CRYPT_OFFSET, &dwPageSize, pBlock->dwCryptSize);
+    __try
+    {
+        // Generate a new random IV for the page
+        if (!CryptGenRandom(g_hProvider, dwBlockSize, (LPBYTE)pBlock->pvIV))
+            break;
+        if (!CryptSetKeyParam(hCurrentKey, KP_IV, (LPBYTE)pBlock->pvIV, 0))
+            break;
+
+        // Copy page data into buffer
+        CopyMemory((LPBYTE)pBlock->pvCrypt, data, pBlock->dwPageSize);
+        data = (LPBYTE)pBlock->pvCrypt;
+
+        // Copy IV to reserved space at the end of the page
+        CopyMemory(((LPBYTE)data) + dwEffectivePageSize, (LPBYTE)pBlock->pvIV, dwBlockSize);
+
+        // Encrypt!
+        {
+            DWORD dwBufferSize = dwEffectivePageSize;
+            CryptEncrypt(hCurrentKey, 0, FALSE, 0, ((LPBYTE)data), &dwBufferSize, dwBufferSize);
+        }
+    }
+    __finally
+    {
+        // Destroy local encryption key
+        CryptDestroyKey(hCurrentKey);
+    }
+
     break;
   }
 
@@ -226,41 +311,62 @@ void * sqlite3Codec(void *pArg, void *data, Pgno nPageNum, int nMode)
 }
 
 /* Derive an encryption key from a user-supplied buffer */
-static HCRYPTKEY DeriveKey(const void *pKey, int nKey)
+static DWORD DeriveKey(const void *pKey, int nKey)
 {
-  HCRYPTHASH hHash = 0;
-  HCRYPTKEY  hKey;
+    HCRYPTHASH hHash = 0;
+    HCRYPTKEY  hKey = (HCRYPTKEY) NULL;
 
-  if (!pKey || !nKey) return 0;
+    if (!pKey || !nKey) return 0;
 
-  if (!InitializeProvider())
-  {
-    return MAXDWORD;
-  }
-
-  {
-    MUTEX_LOGIC( sqlite3_mutex *pMaster = sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_MASTER); )
-    sqlite3_mutex_enter(pMaster);
-
-    if (CryptCreateHash(g_hProvider, CALG_SHA1, 0, 0, &hHash))
+    if (!InitializeProvider())
     {
-      if (CryptHashData(hHash, (LPBYTE)pKey, nKey, 0))
-      {
-        CryptDeriveKey(g_hProvider, CALG_RC4, hHash, 0, &hKey);
-      }
-      CryptDestroyHash(hHash);
+        return MAXDWORD;
     }
 
-    sqlite3_mutex_leave(pMaster);
-  }
+    {
+        MUTEX_LOGIC( sqlite3_mutex *pMaster = sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_MASTER); )
+        sqlite3_mutex_enter(pMaster);
+        __try
+        {
+            if (!CryptCreateHash(g_hProvider, CALG_SHA_512, 0, 0, &hHash))
+                return MAXDWORD;
+            __try
+            {
+                if (!CryptHashData(hHash, (LPBYTE)pKey, nKey, 0))
+                    return MAXDWORD;
+                if (!CryptDeriveKey(g_hProvider, CALG_AES_256, hHash, 0, &hKey))
+                {
+                    return MAXDWORD;
+                }
+                else
+                {
+                    DWORD dwMode = CRYPT_MODE_CBC;
+                    if (!CryptSetKeyParam(hKey, KP_MODE, (BYTE*)&dwMode, 0))
+                    {
+                        CryptDestroyKey(hKey);
+                        return MAXDWORD;
+                    }
+                }
+            
+            }
+            __finally
+            {
+                CryptDestroyHash(hHash);
+            }
 
-  return hKey;
+        }
+        __finally
+        {
+            sqlite3_mutex_leave(pMaster);
+        }
+    }
+
+    return hKey;
 }
 
 /* Called by sqlite and sqlite3_key_interop to attach a key to a database. */
 int sqlite3CodecAttach(sqlite3 *db, int nDb, const void *pKey, int nKeyLen)
 {
-  int rc = SQLITE_ERROR;
   HCRYPTKEY hKey = 0;
 
   /* No key specified, could mean either use the main db's encryption or no encryption */
@@ -282,7 +388,7 @@ int sqlite3CodecAttach(sqlite3 *db, int nDb, const void *pKey, int nKeyLen)
       if (!pBlock->hReadKey) return SQLITE_OK; /* Not encrypted */
 
       if (!CryptDuplicateKey(pBlock->hReadKey, NULL, 0, &hKey))
-        return rc; /* Unable to duplicate the key */
+        return SQLITE_ERROR; /* Unable to duplicate the key */
     }
   }
   else /* User-supplied passphrase, so create a cryptographic key out of it */
@@ -291,11 +397,11 @@ int sqlite3CodecAttach(sqlite3 *db, int nDb, const void *pKey, int nKeyLen)
     if (hKey == MAXDWORD)
     {
 #if SQLITE_VERSION_NUMBER >= 3008007
-      sqlite3ErrorWithMsg(db, rc, SQLITECRYPTERROR_PROVIDER);
+        sqlite3ErrorWithMsg(db, SQLITE_ERROR, SQLITECRYPTERROR_PROVIDER);
 #else
-      sqlite3Error(db, rc, SQLITECRYPTERROR_PROVIDER);
+        sqlite3Error(db, SQLITE_ERROR, SQLITECRYPTERROR_PROVIDER);
 #endif
-      return rc;
+        return SQLITE_ERROR;
     }
   }
 
@@ -303,14 +409,49 @@ int sqlite3CodecAttach(sqlite3 *db, int nDb, const void *pKey, int nKeyLen)
   if (hKey)
   {
     Pager *p = sqlite3BtreePager(db->aDb[nDb].pBt);
+
     LPCRYPTBLOCK pBlock = CreateCryptBlock(hKey, p, -1, NULL);
-    if (!pBlock) return SQLITE_NOMEM;
+    if (!pBlock)
+    {
+        CryptDestroyKey(hKey);
+        return SQLITE_NOMEM;
+    }
+
+    __try
+    {
+        sqlite3_mutex_enter(db->mutex);
+        if (p->nReserve != pBlock->dwBlockSize)
+        {
+            int rc = sqlite3BtreeSetPageSize(db->aDb[0].pBt, p->pageSize, pBlock->dwBlockSize, 0);
+            if (rc != SQLITE_OK)
+            {
+#if SQLITE_VERSION_NUMBER >= 3008007
+                sqlite3ErrorWithMsg(db, rc, "could not set reserved space! setpagesize failed");
+#else
+                sqlite3Error(db, rc, "could not set reserved space! setpagesize failed");
+#endif
+                sqlite3CodecFree(pBlock);
+                return rc;
+            }
+        }
+    }
+    __finally
+    {
+        sqlite3_mutex_leave(db->mutex);
+    }
 
     sqlite3PagerSetCodec(p, sqlite3Codec, sqlite3CodecSizeChange, sqlite3CodecFree, pBlock);
-
-    rc = SQLITE_OK;
+    return SQLITE_OK;
   }
-  return rc;
+  else
+  {
+#if SQLITE_VERSION_NUMBER >= 3008007
+      sqlite3ErrorWithMsg(db, SQLITE_ERROR, "could not acquire key!");
+#else
+      sqlite3Error(db, SQLITE_ERROR, "could not acquire key!");
+#endif
+      return SQLITE_ERROR;
+  }
 }
 
 /* Once a password has been supplied and a key created, we don't keep the
@@ -329,131 +470,140 @@ void sqlite3CodecGetKey(sqlite3 *db, int nDb, void **ppKey, int *pnKeyLen)
 /* We do not attach this key to the temp store, only the main database. */
 SQLITE_API int sqlite3_key_v2(sqlite3 *db, const char *zDbName, const void *pKey, int nKey)
 {
-  return sqlite3CodecAttach(db, 0, pKey, nKey);
+    return sqlite3CodecAttach(db, 0, pKey, nKey);
 }
 
 SQLITE_API int sqlite3_key(sqlite3 *db, const void *pKey, int nKey)
 {
-  return sqlite3_key_v2(db, 0, pKey, nKey);
+    return sqlite3_key_v2(db, 0, pKey, nKey);
 }
 
 /* Changes the encryption key for an existing database. */
 SQLITE_API int sqlite3_rekey_v2(sqlite3 *db, const char *zDbName, const void *pKey, int nKey)
 {
-  Btree *pbt = db->aDb[0].pBt;
-  Pager *p = sqlite3BtreePager(pbt);
-  LPCRYPTBLOCK pBlock = (LPCRYPTBLOCK)sqlite3pager_get_codecarg(p);
-  HCRYPTKEY hKey = DeriveKey(pKey, nKey);
-  int rc = SQLITE_ERROR;
+    int rc;
+    sqlite3_mutex_enter(db->mutex);
 
-  if (hKey == MAXDWORD)
-  {
+    rc = SQLITE_ERROR;
 #if SQLITE_VERSION_NUMBER >= 3008007
-    sqlite3ErrorWithMsg(db, rc, SQLITECRYPTERROR_PROVIDER);
+    sqlite3ErrorWithMsg(db, rc, "rekey is not implemented");
 #else
-    sqlite3Error(db, rc, SQLITECRYPTERROR_PROVIDER);
+    sqlite3Error(db, rc, "rekey is not implemented");
 #endif
+
+    rc = sqlite3ApiExit(db, rc);
+    sqlite3_mutex_leave(db->mutex);
     return rc;
-  }
+    
+  //Btree *pbt = db->aDb[0].pBt;
+  //Pager *p = sqlite3BtreePager(pbt);
+  //LPCRYPTBLOCK pBlock = (LPCRYPTBLOCK)sqlite3pager_get_codecarg(p);
+  //HCRYPTKEY hKey = DeriveKey(pKey, nKey);
+  //int rc = SQLITE_ERROR;
 
-  if (!pBlock && !hKey) return SQLITE_OK; /* Wasn't encrypted to begin with */
+  //if (hKey == MAXDWORD)
+  //{
+  //  sqlite3Error(db, rc, SQLITECRYPTERROR_PROVIDER);
+  //  return rc;
+  //}
 
-  /* To rekey a database, we change the writekey for the pager.  The readkey remains
-  ** the same
-  */
-  if (!pBlock) /* Encrypt an unencrypted database */
-  {
-    pBlock = CreateCryptBlock(hKey, p, -1, NULL);
-    if (!pBlock)
-      return SQLITE_NOMEM;
+  //if (!pBlock && !hKey) return SQLITE_OK; /* Wasn't encrypted to begin with */
 
-    pBlock->hReadKey = 0; /* Original database is not encrypted */
-    sqlite3PagerSetCodec(sqlite3BtreePager(pbt), sqlite3Codec, sqlite3CodecSizeChange, sqlite3CodecFree, pBlock);
-  }
-  else /* Change the writekey for an already-encrypted database */
-  {
-    pBlock->hWriteKey = hKey;
-  }
+  ///* To rekey a database, we change the writekey for the pager.  The readkey remains
+  //** the same
+  //*/
+  //if (!pBlock) /* Encrypt an unencrypted database */
+  //{
+  //  pBlock = CreateCryptBlock(hKey, p, -1, NULL);
+  //  if (!pBlock)
+  //  {
+  //      CryptDestroyKey(hKey);
+  //      return SQLITE_NOMEM;
+  //  }
 
-  sqlite3_mutex_enter(db->mutex);
+  //  pBlock->hReadKey = 0; /* Original database is not encrypted */
+  //  sqlite3PagerSetCodec(p, sqlite3Codec, sqlite3CodecSizeChange, sqlite3CodecFree, pBlock);
+  //}
+  //else /* Change the writekey for an already-encrypted database */
+  //{
+  //  pBlock->hWriteKey = hKey;
+  //}
 
-  /* Start a transaction */
-  rc = sqlite3BtreeBeginTrans(pbt, 1);
+  //sqlite3_mutex_enter(db->mutex);
 
-  if (!rc)
-  {
-    /* Rewrite all the pages in the database using the new encryption key */
-    Pgno nPage;
-    Pgno nSkip = PAGER_MJ_PGNO(p);
-    DbPage *pPage;
-    Pgno n;
-    int count;
+  ///* Start a transaction */
+  //rc = sqlite3BtreeBeginTrans(pbt, 1);
 
-    sqlite3PagerPagecount(p, &count);
-    nPage = (Pgno)count;
+  //if (!rc)
+  //{
+  //  /* Rewrite all the pages in the database using the new encryption key */
+  //  Pgno nPage;
+  //  Pgno nSkip = PAGER_MJ_PGNO(p);
+  //  DbPage *pPage;
+  //  Pgno n;
+  //  int count;
 
-    for(n = 1; n <= nPage; n ++)
-    {
-      if (n == nSkip) continue;
-      rc = sqlite3PagerGet(p, n, &pPage);
-      if(!rc)
-      {
-        rc = sqlite3PagerWrite(pPage);
-        sqlite3PagerUnref(pPage);
-      }
-    }
-  }
+  //  sqlite3PagerPagecount(p, &count);
+  //  nPage = (Pgno)count;
 
-  /* If we succeeded, try and commit the transaction */
-  if (!rc)
-  {
-    rc = sqlite3BtreeCommit(pbt);
-  }
+  //  for(n = 1; n <= nPage; n ++)
+  //  {
+  //    if (n == nSkip) continue;
+  //    rc = sqlite3PagerGet(p, n, &pPage);
+  //    if(!rc)
+  //    {
+  //      rc = sqlite3PagerWrite(pPage);
+  //      sqlite3PagerUnref(pPage);
+  //    }
+  //  }
+  //}
 
-  // If we failed, rollback */
-  if (rc)
-  {
-#if SQLITE_VERSION_NUMBER >= 3008007
-    sqlite3BtreeRollback(pbt, SQLITE_OK, 0);
-#else
-    sqlite3BtreeRollback(pbt, SQLITE_OK);
-#endif
-  }
+  ///* If we succeeded, try and commit the transaction */
+  //if (!rc)
+  //{
+  //  rc = sqlite3BtreeCommit(pbt);
+  //}
 
-  /* If we succeeded, destroy any previous read key this database used
-  ** and make the readkey equal to the writekey
-  */
-  if (!rc)
-  {
-    if (pBlock->hReadKey)
-    {
-      CryptDestroyKey(pBlock->hReadKey);
-    }
-    pBlock->hReadKey = pBlock->hWriteKey;
-  }
-  /* We failed.  Destroy the new writekey (if there was one) and revert it back to
-  ** the original readkey
-  */
-  else
-  {
-    if (pBlock->hWriteKey)
-    {
-      CryptDestroyKey(pBlock->hWriteKey);
-    }
-    pBlock->hWriteKey = pBlock->hReadKey;
-  }
+  //// If we failed, rollback */
+  //if (rc)
+  //{
+  //  sqlite3BtreeRollback(pbt, SQLITE_OK);
+  //}
 
-  /* If the readkey and writekey are both empty, there's no need for a codec on this
-  ** pager anymore.  Destroy the crypt block and remove the codec from the pager.
-  */
-  if (!pBlock->hReadKey && !pBlock->hWriteKey)
-  {
-    sqlite3PagerSetCodec(p, NULL, NULL, NULL, NULL);
-  }
+  ///* If we succeeded, destroy any previous read key this database used
+  //** and make the readkey equal to the writekey
+  //*/
+  //if (!rc)
+  //{
+  //  if (pBlock->hReadKey)
+  //  {
+  //    CryptDestroyKey(pBlock->hReadKey);
+  //  }
+  //  pBlock->hReadKey = pBlock->hWriteKey;
+  //}
+  ///* We failed.  Destroy the new writekey (if there was one) and revert it back to
+  //** the original readkey
+  //*/
+  //else
+  //{
+  //  if (pBlock->hWriteKey)
+  //  {
+  //    CryptDestroyKey(pBlock->hWriteKey);
+  //  }
+  //  pBlock->hWriteKey = pBlock->hReadKey;
+  //}
 
-  sqlite3_mutex_leave(db->mutex);
+  ///* If the readkey and writekey are both empty, there's no need for a codec on this
+  //** pager anymore.  Destroy the crypt block and remove the codec from the pager.
+  //*/
+  //if (!pBlock->hReadKey && !pBlock->hWriteKey)
+  //{
+  //  sqlite3PagerSetCodec(p, NULL, NULL, NULL, NULL);
+  //}
 
-  return rc;
+  //sqlite3_mutex_leave(db->mutex);
+
+  //return rc;
 }
 
 SQLITE_API int sqlite3_rekey(sqlite3 *db, const void *pKey, int nKey)
