@@ -1,0 +1,396 @@
+###############################################################################
+#
+# tkt-a7d04fb111.eagle --
+#
+# Written by Joe Mistachkin.
+# Released to the public domain, use at your own risk!
+#
+###############################################################################
+
+package require Eagle
+package require Eagle.Library
+package require Eagle.Test
+
+runTestPrologue
+
+###############################################################################
+
+package require System.Data.SQLite.Test
+runSQLiteTestPrologue
+
+###############################################################################
+
+set rawDateTimeValue "2015-02-18 00:00:00.0000000"
+
+###############################################################################
+
+runTest {test tkt-a7d04fb111-1.1 {Bind DateTime Utc Ticks} -setup {
+  setupDb [set fileName tkt-a7d04fb111-1.1.db] "" Ticks Utc \
+      BindDateTimeWithKind
+} -body {
+  set dateTimeValue(0) [object invoke \
+      -create DateTime ParseExact $rawDateTimeValue \
+      [getDateTimeFormat] null]
+
+  set dateTimeValue(1) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Utc]
+
+  set dateTimeValue(2) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Local]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(0)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(1)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(2)]]
+
+  lappend result [expr {[lindex $result 0] == [lindex $result 1]}]
+  lappend result [expr {[lindex $result 0] == [lindex $result 2]}]
+  lappend result [expr {[lindex $result 1] == [lindex $result 2]}]
+} -cleanup {
+  cleanupDb $fileName
+
+  unset -nocomplain result dateTimeValue db fileName
+} -constraints \
+{eagle monoBug28 command.sql compile.DATA SQLite System.Data.SQLite} -result \
+{635598144000000000 635598144000000000 635598432000000000 True False False}}
+
+###############################################################################
+
+runTest {test tkt-a7d04fb111-1.2 {Bind DateTime Local Ticks} -setup {
+  setupDb [set fileName tkt-a7d04fb111-1.2.db] "" Ticks Local \
+      BindDateTimeWithKind
+} -body {
+  set dateTimeValue(0) [object invoke \
+      -create DateTime ParseExact $rawDateTimeValue \
+      [getDateTimeFormat] null]
+
+  set dateTimeValue(1) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Utc]
+
+  set dateTimeValue(2) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Local]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(0)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(1)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(2)]]
+
+  lappend result [expr {[lindex $result 0] == [lindex $result 1]}]
+  lappend result [expr {[lindex $result 0] == [lindex $result 2]}]
+  lappend result [expr {[lindex $result 1] == [lindex $result 2]}]
+} -cleanup {
+  cleanupDb $fileName
+
+  unset -nocomplain result dateTimeValue db fileName
+} -constraints \
+{eagle monoBug28 command.sql compile.DATA SQLite System.Data.SQLite} -result \
+{635598144000000000 635597856000000000 635598144000000000 False True False}}
+
+###############################################################################
+
+runTest {test tkt-a7d04fb111-1.3 {Bind DateTime Utc ISO8601} -setup {
+  setupDb [set fileName tkt-a7d04fb111-1.3.db] "" ISO8601 Utc \
+      BindDateTimeWithKind
+} -body {
+  set dateTimeValue(0) [object invoke \
+      -create DateTime ParseExact $rawDateTimeValue \
+      [getDateTimeFormat] null]
+
+  set dateTimeValue(1) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Utc]
+
+  set dateTimeValue(2) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Local]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(0)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(1)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(2)]]
+
+  lappend result [expr {[lindex $result 0] eq [lindex $result 1]}]
+  lappend result [expr {[lindex $result 0] eq [lindex $result 2]}]
+  lappend result [expr {[lindex $result 1] eq [lindex $result 2]}]
+} -cleanup {
+  cleanupDb $fileName
+
+  unset -nocomplain result dateTimeValue db fileName
+} -constraints \
+{eagle monoBug28 command.sql compile.DATA SQLite System.Data.SQLite} -result \
+{{2015-02-18 00:00:00Z} {2015-02-18 00:00:00Z} {2015-02-18 08:00:00Z} True\
+False False}}
+
+###############################################################################
+
+runTest {test tkt-a7d04fb111-1.4 {Bind DateTime Local ISO8601} -setup {
+  setupDb [set fileName tkt-a7d04fb111-1.4.db] "" ISO8601 Local \
+      BindDateTimeWithKind
+} -body {
+  set dateTimeValue(0) [object invoke \
+      -create DateTime ParseExact $rawDateTimeValue \
+      [getDateTimeFormat] null]
+
+  set dateTimeValue(1) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Utc]
+
+  set dateTimeValue(2) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Local]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(0)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(1)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(2)]]
+
+  lappend result [expr {[lindex $result 0] eq [lindex $result 1]}]
+  lappend result [expr {[lindex $result 0] eq [lindex $result 2]}]
+  lappend result [expr {[lindex $result 1] eq [lindex $result 2]}]
+} -cleanup {
+  cleanupDb $fileName
+
+  unset -nocomplain result dateTimeValue db fileName
+} -constraints \
+{eagle monoBug28 command.sql compile.DATA SQLite System.Data.SQLite} -result \
+{{2015-02-18 00:00:00} {2015-02-17 16:00:00} {2015-02-18 00:00:00} False True\
+False}}
+
+###############################################################################
+
+runTest {test tkt-a7d04fb111-1.5 {Bind DateTime Utc JulianDay} -setup {
+  setupDb [set fileName tkt-a7d04fb111-1.5.db] "" JulianDay Utc \
+      BindDateTimeWithKind
+} -body {
+  set dateTimeValue(0) [object invoke \
+      -create DateTime ParseExact $rawDateTimeValue \
+      [getDateTimeFormat] null]
+
+  set dateTimeValue(1) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Utc]
+
+  set dateTimeValue(2) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Local]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(0)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(1)]]
+
+  lappend result [expr {round2([sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(2)]], 2)}]
+
+  lappend result [expr {[lindex $result 0] == [lindex $result 1]}]
+  lappend result [expr {[lindex $result 0] == [lindex $result 2]}]
+  lappend result [expr {[lindex $result 1] == [lindex $result 2]}]
+} -cleanup {
+  cleanupDb $fileName
+
+  unset -nocomplain result dateTimeValue db fileName
+} -constraints \
+{eagle monoBug28 command.sql compile.DATA SQLite System.Data.SQLite} -result \
+{2457071.5 2457071.5 2457071.83 True False False}}
+
+###############################################################################
+
+runTest {test tkt-a7d04fb111-1.6 {Bind DateTime Local JulianDay} -setup {
+  setupDb [set fileName tkt-a7d04fb111-1.6.db] "" JulianDay Local \
+      BindDateTimeWithKind
+} -body {
+  set dateTimeValue(0) [object invoke \
+      -create DateTime ParseExact $rawDateTimeValue \
+      [getDateTimeFormat] null]
+
+  set dateTimeValue(1) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Utc]
+
+  set dateTimeValue(2) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Local]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(0)]]
+
+  lappend result [expr {round2([sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(1)]], 2)}]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(2)]]
+
+  lappend result [expr {[lindex $result 0] == [lindex $result 1]}]
+  lappend result [expr {[lindex $result 0] == [lindex $result 2]}]
+  lappend result [expr {[lindex $result 1] == [lindex $result 2]}]
+} -cleanup {
+  cleanupDb $fileName
+
+  unset -nocomplain result dateTimeValue db fileName
+} -constraints \
+{eagle monoBug28 command.sql compile.DATA SQLite System.Data.SQLite} -result \
+{2457071.5 2457071.17 2457071.5 False True False}}
+
+###############################################################################
+
+runTest {test tkt-a7d04fb111-1.7 {Bind DateTime Utc UnixEpoch} -setup {
+  setupDb [set fileName tkt-a7d04fb111-1.7.db] "" UnixEpoch Utc \
+      BindDateTimeWithKind
+} -body {
+  set dateTimeValue(0) [object invoke \
+      -create DateTime ParseExact $rawDateTimeValue \
+      [getDateTimeFormat] null]
+
+  set dateTimeValue(1) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Utc]
+
+  set dateTimeValue(2) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Local]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(0)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(1)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(2)]]
+
+  lappend result [expr {[lindex $result 0] == [lindex $result 1]}]
+  lappend result [expr {[lindex $result 0] == [lindex $result 2]}]
+  lappend result [expr {[lindex $result 1] == [lindex $result 2]}]
+} -cleanup {
+  cleanupDb $fileName
+
+  unset -nocomplain result dateTimeValue db fileName
+} -constraints \
+{eagle monoBug28 command.sql compile.DATA SQLite System.Data.SQLite} -result \
+{1424217600 1424217600 1424246400 True False False}}
+
+###############################################################################
+
+runTest {test tkt-a7d04fb111-1.8 {Bind DateTime Local UnixEpoch} -setup {
+  setupDb [set fileName tkt-a7d04fb111-1.8.db] "" UnixEpoch Local \
+      BindDateTimeWithKind
+} -body {
+  set dateTimeValue(0) [object invoke \
+      -create DateTime ParseExact $rawDateTimeValue \
+      [getDateTimeFormat] null]
+
+  set dateTimeValue(1) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Utc]
+
+  set dateTimeValue(2) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Local]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(0)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(1)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(2)]]
+
+  lappend result [expr {[lindex $result 0] == [lindex $result 1]}]
+  lappend result [expr {[lindex $result 0] == [lindex $result 2]}]
+  lappend result [expr {[lindex $result 1] == [lindex $result 2]}]
+} -cleanup {
+  cleanupDb $fileName
+
+  unset -nocomplain result dateTimeValue db fileName
+} -constraints \
+{eagle monoBug28 command.sql compile.DATA SQLite System.Data.SQLite} -result \
+{1424217600 1424188800 1424217600 False True False}}
+
+###############################################################################
+
+runTest {test tkt-a7d04fb111-1.9 {Bind DateTime Utc Invariant} -setup {
+  setupDb [set fileName tkt-a7d04fb111-1.9.db] "" InvariantCulture Utc \
+      BindDateTimeWithKind
+} -body {
+  set dateTimeValue(0) [object invoke \
+      -create DateTime ParseExact $rawDateTimeValue \
+      [getDateTimeFormat] null]
+
+  set dateTimeValue(1) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Utc]
+
+  set dateTimeValue(2) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Local]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(0)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(1)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(2)]]
+
+  lappend result [expr {[lindex $result 0] eq [lindex $result 1]}]
+  lappend result [expr {[lindex $result 0] eq [lindex $result 2]}]
+  lappend result [expr {[lindex $result 1] eq [lindex $result 2]}]
+} -cleanup {
+  cleanupDb $fileName
+
+  unset -nocomplain result dateTimeValue db fileName
+} -constraints \
+{eagle monoBug28 command.sql compile.DATA SQLite System.Data.SQLite} -result \
+{2015-02-18T00:00:00.0000000 2015-02-18T00:00:00.0000000Z\
+2015-02-18T08:00:00.0000000Z False False False}}
+
+###############################################################################
+
+runTest {test tkt-a7d04fb111-1.10 {Bind DateTime Local Invariant} -setup {
+  setupDb [set fileName tkt-a7d04fb111-1.10.db] "" InvariantCulture Local \
+      BindDateTimeWithKind
+} -body {
+  set dateTimeValue(0) [object invoke \
+      -create DateTime ParseExact $rawDateTimeValue \
+      [getDateTimeFormat] null]
+
+  set dateTimeValue(1) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Utc]
+
+  set dateTimeValue(2) [object invoke -create -alias \
+      DateTime SpecifyKind $dateTimeValue(0) Local]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(0)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(1)]]
+
+  lappend result [sql execute -execute scalar $db "SELECT ?;" \
+      [list param1 DateTime $dateTimeValue(2)]]
+
+  lappend result [expr {[lindex $result 0] eq [lindex $result 1]}]
+  lappend result [expr {[lindex $result 0] eq [lindex $result 2]}]
+  lappend result [expr {[lindex $result 1] eq [lindex $result 2]}]
+} -cleanup {
+  cleanupDb $fileName
+
+  unset -nocomplain result dateTimeValue db fileName
+} -constraints \
+{eagle monoBug28 command.sql compile.DATA SQLite System.Data.SQLite} -result \
+{2015-02-18T00:00:00.0000000 2015-02-17T16:00:00.0000000-08:00\
+2015-02-18T00:00:00.0000000-08:00 False False False}}
+
+###############################################################################
+
+unset -nocomplain rawDateTimeValue
+
+###############################################################################
+
+runSQLiteTestEpilogue
+runTestEpilogue
